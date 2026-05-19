@@ -1,23 +1,23 @@
 import asyncio
-import os
 import itertools
-
+import os
+ 
 import discord
 import spotipy
 import yt_dlp
-
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands
 from dotenv import load_dotenv
 from spotipy.oauth2 import SpotifyClientCredentials
-
+ 
 load_dotenv()
 
+ 
 FFMPEG_OPTS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
     "options": "-vn",
 }
-
+ 
 YTDL_OPTS = {
     "format": "bestaudio/best",
     "restrictfilenames": True,
@@ -31,12 +31,12 @@ YTDL_OPTS = {
 }
  
 SPECIAL_USER_ID = 936929561302675456
-# [] convert to variable and add an admin command to enter/edit the id/user
-
-#
-# Music Player
-#
-
+ 
+ 
+# 
+# MusicPlayer
+# 
+ 
 class MusicPlayer:
     """Manages the queue and playback for a single guild."""
  
@@ -45,7 +45,7 @@ class MusicPlayer:
         self.guild_id = guild_id
         self.queue: list[dict] = []
         self.current_song: str | None = None
-        
+
     def enqueue(self, item: dict) -> None:
         self.queue.append(item)
 
@@ -70,14 +70,14 @@ class MusicPlayer:
             except Exception as exc:
                 print(f"[MusicPlayer] Playback error: {exc}")
                 self._schedule_next()
-
+ 
     def _schedule_next(self) -> None:
         asyncio.run_coroutine_threadsafe(self.play_next(), self.bot.loop)
-
+ 
     async def _resolve_url(self, item: dict) -> str | None:
         if item["type"] == "url":
             return item["data"]
-    
+
         loop = asyncio.get_event_loop()
         try:
             result = await loop.run_in_executor(None, self._search, item["data"])
@@ -85,7 +85,7 @@ class MusicPlayer:
         except Exception as exc:
             print(f"[MusicPlayer] Search resolve error: {exc}")
             return None
-
+ 
     @staticmethod
     def _search(query: str) -> str | None:
         with yt_dlp.YoutubeDL(YTDL_OPTS) as ydl:
@@ -97,23 +97,25 @@ class MusicPlayer:
             except Exception as exc:
                 print(f"[MusicPlayer] yt-dlp search error: {exc}")
         return None
-    
+ 
+ 
     async def stop(self) -> None:
         self.queue.clear()
         self.current_song = None
         guild = self.bot.get_guild(self.guild_id)
         if guild and guild.voice_client:
             await guild.voice_client.disconnect()
-
-#
-# Music Cog
-#
-
+ 
+ 
+# 
+# MusicCog
+# 
+ 
 class MusicCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self._players: dict[int, MusicPlayer] = {}
-        self._connecting: set[int] = set()
+        self._connecting: set[int] = set()  # guild IDs currently connecting
  
         self._play_messages = itertools.cycle([
             "Moment… ich leg Ihnen mal schnell die _*{title}*_ Kassette ein",
@@ -140,8 +142,11 @@ class MusicCog(commands.Cog):
         )
         if not self.sp:
             print("[MusicCog] Spotify credentials missing — Spotify support disabled.")
-
-
+ 
+    # 
+    # Helpers
+    # 
+ 
     def _get_player(self, guild_id: int) -> MusicPlayer:
         if guild_id not in self._players:
             self._players[guild_id] = MusicPlayer(self.bot, guild_id)
@@ -170,7 +175,7 @@ class MusicCog(commands.Cog):
     @staticmethod
     def _detect_spotify_type(url: str) -> str | None:
         for kind in ("track", "playlist", "album"):
-            if f"spotify.com/{kind}/" in url or f"spotify:{kind}:" in url:
+            if f"/{kind}/" in url:
                 return kind
         return None
  
@@ -197,40 +202,43 @@ class MusicCog(commands.Cog):
             player.enqueue({"type": "search", "data": name, "title": name})
             count += 1
         return count
-
-#
-# Commands
-#
-
-    @app_commands.command(name="play", description="Play a song or add to queue")
+ 
+    # 
+    # Commands
+    # 
+ 
+    @app_commands.command(name="play", description="Play a song or add it to the queue")
     async def play(self, interaction: discord.Interaction, query: str) -> None:
         await interaction.response.defer()
+ 
+        print(f"[DEBUG] query: {query!r}")
+        print(f"[DEBUG] spotify_type: {self._detect_spotify_type(query)!r}")
 
         if not interaction.user.voice:
             await interaction.followup.send("You're not in a voice channel.")
             return
-
-        voice_client = await self._connect_voice(interaction)
+ 
+        voice_client = await self._ensure_voice(interaction)
         if voice_client is None:
             return
-
-        player = self.get_player(interaction.guild.id)
-        spotify_type, _ = self._extract_spotify_type(query)
-
+ 
+        player = self._get_player(interaction.guild.id)
+        spotify_type = self._detect_spotify_type(query)
+ 
         if spotify_type:
             if not self.sp:
                 await interaction.followup.send("Spotify is not configured.")
                 return
             try:
                 added = self._enqueue_spotify(player, query, spotify_type)
-            except Exception as error:
-                await interaction.followup.send(f"Spotify error: {error}")
-                return 
+            except Exception as exc:
+                await interaction.followup.send(f"Spotify error: {exc}")
+                return
             if added == 0:
-                    await interaction.followup.send(f"No playable tracks found in Spotify {spotify_type}.")
-                    return
+                await interaction.followup.send(f"No playable tracks found in Spotify {spotify_type}.")
+                return
             await interaction.followup.send(f"Added **{added}** Spotify {spotify_type} track(s) to queue.")
-
+ 
         else:
             try:
                 loop = asyncio.get_event_loop()
@@ -256,27 +264,31 @@ class MusicCog(commands.Cog):
             if player.current_song:
                 msg = next(self._play_messages).format(title=player.current_song)
                 await interaction.followup.send(msg)
-
-
-    @app_commands.command(name="stop", description="Stop the playing song and clear the queue")
+ 
+    @app_commands.command(name="stop", description="Stop playback and clear the queue")
     async def stop(self, interaction: discord.Interaction) -> None:
         if interaction.user.id == SPECIAL_USER_ID:
             await interaction.response.send_message("LECK EI!")
             return
-        
+ 
         if not interaction.guild.voice_client:
-            await interaction.followup.send("I'm not connected to any voice channel.")
+            await interaction.response.send_message("I'm not connected to any voice channel.")
             return
-
-        player = self.get_player(interaction.guild.id)
+ 
+        player = self._get_player(interaction.guild.id)
         await player.stop()
         await interaction.response.send_message(next(self._stop_messages))
-
-
-    @app_commands.command(name="hello", description="Say hello... but not to the bot")
-    async def hello(self, interaction: discord.Interaction, message: str, user: discord.User = None, user_id: str = None) -> None:
+ 
+    @app_commands.command(name="hello", description="Send a DM to another user")
+    async def hello(
+        self,
+        interaction: discord.Interaction,
+        message: str,
+        user: discord.User = None,
+        user_id: str = None,
+    ) -> None:
         await interaction.response.defer(ephemeral=True)
-        
+ 
         target = user
         if target is None:
             if user_id is None:
@@ -290,36 +302,38 @@ class MusicCog(commands.Cog):
             except discord.NotFound:
                 await interaction.followup.send("No user found with that ID.")
                 return
-            except discord.HTTPException as error:
-                await interaction.followup.send(f"Failed to fetch user: {error}")
+            except discord.HTTPException as exc:
+                await interaction.followup.send(f"Failed to fetch user: {exc}")
                 return
-            
+ 
         try:
             await target.send(message)
             await interaction.followup.send(f"DM sent to **{target.name}**: \"{message}\"")
         except discord.Forbidden:
-            await interaction.followup.send("Can't DM that user (they may have DMs diabled).")
-        except discord.HTTPException as error:
-            await interaction.followup.send(f"Failed to send DM: {error}")
-
+            await interaction.followup.send("I can't DM that user (they may have DMs disabled).")
+        except discord.HTTPException as exc:
+            await interaction.followup.send(f"Failed to send DM: {exc}")
+ 
+ 
 #
 # Bot
 #
-
+ 
 class MusicBot(commands.Bot):
-    def __init__(self):
+    def __init__(self) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
         intents.voice_states = True
         super().__init__(command_prefix="!", intents=intents)
-
-    async def setup_hook(self):
+ 
+    async def setup_hook(self) -> None:
         await self.add_cog(MusicCog(self))
         await self.tree.sync()
-
-    async def on_ready(self):
-        print(f'Logged in as {self.user}')
-        print(f'Opus loaded: {discord.opus.is_loaded()}')
-
+ 
+    async def on_ready(self) -> None:
+        print(f"Logged in as {self.user}")
+        print(f"Opus loaded: {discord.opus.is_loaded()}")
+ 
+ 
 if __name__ == "__main__":
-    MusicBot().run(os.getenv('DISCORD_TOKEN'))
+    MusicBot().run(os.getenv("DISCORD_TOKEN"))
