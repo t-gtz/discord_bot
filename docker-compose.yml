@@ -3,8 +3,9 @@ version: "3.8"
 services:
   discord-bot:
     build: .
-    env_file:
-      - .env
     container_name: discord-music-bot
     restart: unless-stopped
-
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
