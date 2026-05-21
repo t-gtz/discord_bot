@@ -287,9 +287,10 @@ class MusicCog(commands.Cog):
         await interaction.response.send_message(next(self._stop_messages))
 
     @app_commands.command(name="queue", description="Show the queue")
-    async def queue(self, interaction: discord.Interaction, ) -> None:
+    async def queue(self, interaction: discord.Interaction) -> None:
 
-        queue = self.show_queue()
+        player = self._get_player(interaction.guild.id)
+        queue = player.show_queue()
         await interaction.response.send_message(queue)
 
  
