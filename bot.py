@@ -49,6 +49,13 @@ class MusicPlayer:
     def enqueue(self, item: dict) -> None:
         self.queue.append(item)
 
+    def show_queue(self) -> str:
+        if not self.queue:
+            return "The queue is empty."
+        lines = [f"**Now Playing:** {self.current_song}"] if self.current_song else []
+        lines += [f"**{idx + 1}.** {item['title']}" for idx, item in enumerate(self.queue)]
+        return "\n".join(lines)
+
     async def play_next(self) -> None:
         if not self.queue:
             self.current_song = None
@@ -278,6 +285,13 @@ class MusicCog(commands.Cog):
         player = self._get_player(interaction.guild.id)
         await player.stop()
         await interaction.response.send_message(next(self._stop_messages))
+
+    @app_commands.command(name="queue", description="Show the queue")
+    async def queue(self, interaction: discord.Interaction, ) -> None:
+
+        queue = self.show_queue()
+        await interaction.response.send_message(queue)
+
  
     @app_commands.command(name="hello", description="Send a DM to another user")
     async def hello(
