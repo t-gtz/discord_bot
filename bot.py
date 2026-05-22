@@ -167,7 +167,7 @@ class MusicCog(commands.Cog):
  
         guild_id = interaction.guild.id
         if guild_id in self._connecting:
-            await interaction.followup.send("🚧 Already connecting — try again in a second.")
+            await interaction.followup.send("Already connecting — try again in a second.")
             return None
  
         self._connecting.add(guild_id)
@@ -186,12 +186,13 @@ class MusicCog(commands.Cog):
                 return kind
         return None
  
-    def _enqueue_spotify(self, player: MusicPlayer, url: str, resource_type: str) -> int:
+    def _enqueue_spotify(self, player: MusicPlayer, url: str, resource_type: str) -> tuple[int, str | None]:
+        first_title: str | None = None
         if resource_type == "track":
             track = self.sp.track(url)
             name = f"{track['artists'][0]['name']} - {track['name']}"
             player.enqueue({"type": "search", "data": name, "title": name})
-            return 1
+            return 1, name
  
         fetcher = {"playlist": self.sp.playlist_items, "album": self.sp.album_tracks}[resource_type]
         results = fetcher(url)
@@ -206,9 +207,11 @@ class MusicCog(commands.Cog):
             if not track:
                 continue
             name = f"{track['artists'][0]['name']} - {track['name']}"
+            if first_title is None:
+                first_title = name
             player.enqueue({"type": "search", "data": name, "title": name})
             count += 1
-        return count
+        return count, first_title
  
     # 
     # Commands
@@ -237,14 +240,14 @@ class MusicCog(commands.Cog):
                 await interaction.followup.send("Spotify is not configured.")
                 return
             try:
-                added = self._enqueue_spotify(player, query, spotify_type)
+                added, title = self._enqueue_spotify(player, query, spotify_type)
             except Exception as exc:
                 await interaction.followup.send(f"Spotify error: {exc}")
                 return
             if added == 0:
                 await interaction.followup.send(f"No playable tracks found in Spotify {spotify_type}.")
                 return
-            await interaction.followup.send(f"Added **{added}** Spotify {spotify_type} track(s) to queue.")
+            await interaction.followup.send(f"Added to queue: **{title or 'Unknown'}**")
  
         else:
             try:
@@ -293,7 +296,64 @@ class MusicCog(commands.Cog):
         queue = player.show_queue()
         await interaction.response.send_message(queue)
 
- 
+    @app_commands.command(name="move", description="Move a song in the queue")
+    async def move(self, interaction: discord.Interaction, song: str, position: int = 1) -> None:
+        await interaction.response.defer()
+
+        player = self._get_player(interaction.guild.id)
+        n = len(player.queue)
+        if n == 0:
+            await interaction.followup.send("The queue is empty.")
+            return
+
+        chosen_item = None
+        try:
+            idx = int(song)
+            if 0 <= idx < n:
+                chosen_item = player.queue.pop(idx)
+        except Exception:
+            # not an index
+            lowered = song.lower()
+            # exact first
+            for i, it in enumerate(player.queue):
+                title = it.get("title", "").lower()
+                if title == lowered:
+                    chosen_item = player.queue.pop(i)
+                    break
+            # substring fallback
+            if chosen_item is None:
+                for i, it in enumerate(player.queue):
+                    title = it.get("title", "").lower()
+                    if lowered in title:
+                        chosen_item = player.queue.pop(i)
+                        break
+
+        if chosen_item is None:
+            await interaction.followup.send("Could not find a matching song in the queue.")
+            return
+
+        if position < 1:
+            position = 1
+        if position > n:
+            position = n
+
+        insert_pos = position - 1
+        player.queue.insert(insert_pos, chosen_item)
+        await interaction.followup.send(f"Moved **{chosen_item.get('title','Unknown')}** to position **{position}**.")
+
+    @move.autocomplete("song")
+    async def move_autocomplete(self, interaction: discord.Interaction, current: str):
+        player = self._get_player(interaction.guild.id)
+        choices: list[app_commands.Choice[str]] = []
+        lowered = (current or "").lower()
+        for idx, item in enumerate(player.queue):
+            title = item.get("title", "Unknown")
+            if not lowered or lowered in title.lower():
+                choices.append(app_commands.Choice(name=f"{idx+1}. {title}", value=str(idx)))
+            if len(choices) >= 25:
+                break
+        return choices
+
     @app_commands.command(name="hello", description="Send a DM to another user")
     async def hello(
         self,
