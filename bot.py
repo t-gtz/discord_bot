@@ -5,6 +5,7 @@ import os
 import discord
 import spotipy
 import yt_dlp
+
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -46,8 +47,12 @@ class MusicPlayer:
         self.queue: list[dict] = []
         self.current_song: str | None = None
 
-    def enqueue(self, item: dict) -> None:
-        self.queue.append(item)
+    def enqueue(self, item: dict, position: int | None) -> None:
+        if position is None:
+            self.queue.append(item)
+        else:
+            insert_position = max(0, min(position - 1, len(self.queue)))
+            self.queue.insert(insert_position, item)
 
     def show_queue(self) -> str:
         if not self.queue:
@@ -122,8 +127,7 @@ class MusicCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self._players: dict[int, MusicPlayer] = {}
-        self._connecting: set[int] = set()  # guild IDs currently connecting
- 
+        self._connecting: set[int] = set()
         self._play_messages = itertools.cycle([
             "Moment… ich leg Ihnen mal schnell die _*{title}*_ Kassette ein",
             "Aha, Sie wollen _*{title}*_ hören! Na dann, ich drück mal auf \"Plee\"",
@@ -186,12 +190,12 @@ class MusicCog(commands.Cog):
                 return kind
         return None
  
-    def _enqueue_spotify(self, player: MusicPlayer, url: str, resource_type: str) -> tuple[int, str | None]:
+    def _enqueue_spotify(self, player: MusicPlayer, url: str, resource_type: str, position: int) -> tuple[int, str | None]:
         first_title: str | None = None
         if resource_type == "track":
             track = self.sp.track(url)
             name = f"{track['artists'][0]['name']} - {track['name']}"
-            player.enqueue({"type": "search", "data": name, "title": name})
+            player.enqueue({"type": "search", "data": name, "title": name}, position)
             return 1, name
  
         fetcher = {"playlist": self.sp.playlist_items, "album": self.sp.album_tracks}[resource_type]
@@ -209,7 +213,7 @@ class MusicCog(commands.Cog):
             name = f"{track['artists'][0]['name']} - {track['name']}"
             if first_title is None:
                 first_title = name
-            player.enqueue({"type": "search", "data": name, "title": name})
+            player.enqueue({"type": "search", "data": name, "title": name}, position)
             count += 1
         return count, first_title
  
@@ -218,11 +222,8 @@ class MusicCog(commands.Cog):
     # 
  
     @app_commands.command(name="play", description="Play a song or add it to the queue")
-    async def play(self, interaction: discord.Interaction, query: str) -> None:
+    async def play(self, interaction: discord.Interaction, query: str, position: int = None) -> None:
         await interaction.response.defer()
- 
-        print(f"[DEBUG] query: {query!r}")
-        print(f"[DEBUG] spotify_type: {self._detect_spotify_type(query)!r}")
 
         if not interaction.user.voice:
             await interaction.followup.send("You're not in a voice channel.")
@@ -240,7 +241,7 @@ class MusicCog(commands.Cog):
                 await interaction.followup.send("Spotify is not configured.")
                 return
             try:
-                added, title = self._enqueue_spotify(player, query, spotify_type)
+                added, title = self._enqueue_spotify(player, query, spotify_type, position)
             except Exception as exc:
                 await interaction.followup.send(f"Spotify error: {exc}")
                 return
@@ -262,7 +263,7 @@ class MusicCog(commands.Cog):
                 title = info.get("title", "Unknown")
                 if not url:
                     raise ValueError("No playable URL found.")
-                player.enqueue({"type": "url", "data": url, "title": title})
+                player.enqueue({"type": "url", "data": url, "title": title}, position)
                 await interaction.followup.send(f"Added to queue: **{title}**")
             except Exception as exc:
                 await interaction.followup.send("Failed to find or play the track.")
@@ -312,15 +313,12 @@ class MusicCog(commands.Cog):
             if 0 <= idx < n:
                 chosen_item = player.queue.pop(idx)
         except Exception:
-            # not an index
             lowered = song.lower()
-            # exact first
             for i, it in enumerate(player.queue):
                 title = it.get("title", "").lower()
                 if title == lowered:
                     chosen_item = player.queue.pop(i)
                     break
-            # substring fallback
             if chosen_item is None:
                 for i, it in enumerate(player.queue):
                     title = it.get("title", "").lower()
