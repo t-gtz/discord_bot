@@ -33,7 +33,74 @@ YTDL_OPTS = {
 }
  
 SPECIAL_USER_ID = 936929561302675456
- 
+
+
+#
+# PlaybackView
+#
+
+class PlaybackView(discord.ui.View):
+    """Interactive playback controls for the music embed."""
+
+    def __init__(self, player: "MusicPlayer") -> None:
+        super().__init__(timeout=None)
+        self.player = player
+
+    def build_embed(self) -> discord.Embed:
+        """Build the playback embed."""
+        if not self.player.current_song:
+            embed = discord.Embed(title="Stopped", color=discord.Color.greyple())
+            embed.description = "No song is currently playing."
+            return embed
+
+        embed = discord.Embed(title="Now Playing", color=discord.Color.blue())
+        embed.description = f"**{self.player.current_song}**"
+
+        if self.player.current_thumbnail:
+            embed.set_thumbnail(url=self.player.current_thumbnail)
+
+        return embed
+
+    async def update(self) -> None:
+        """Update the playback embed in-place."""
+        if self.player.playback_message is None:
+            return
+
+        try:
+            await self.player.playback_message.edit(embed=self.build_embed(), view=self)
+        except discord.NotFound:
+            self.player.playback_message = None
+
+    @discord.ui.button(label="Skip", style=discord.ButtonStyle.primary, emoji="⏭")
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer()
+        guild = interaction.guild
+        voice_client = guild.voice_client if guild else None
+        if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+            voice_client.stop()
+
+    @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, emoji="⏹️")
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer()
+        await self.player.stop()
+        await self.update()
+
+    @discord.ui.button(label="Shuffle", style=discord.ButtonStyle.secondary, emoji="🔀")
+    async def shuffle_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer()
+        random.shuffle(self.player.queue)
+        await self.update()
+
+    @discord.ui.button(label="Queue", style=discord.ButtonStyle.secondary, emoji="📋")
+    async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not self.player.queue:
+            await interaction.response.send_message("The queue is empty.", ephemeral=True)
+            return
+
+        queue_text = "\n".join([f"{idx + 1}. {item['title']}" for idx, item in enumerate(self.player.queue)])
+        embed = discord.Embed(title="Queue", description=queue_text, color=discord.Color.blue())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
  
 # 
 # MusicPlayer
@@ -47,6 +114,9 @@ class MusicPlayer:
         self.guild_id = guild_id
         self.queue: list[dict] = []
         self.current_song: str | None = None
+        self.playback_message: discord.Message | None = None
+        self.view: PlaybackView | None = None
+        self.current_thumbnail: str | None = None
 
     def enqueue(self, item: dict, position: int | None) -> None:
         if position is None:
@@ -65,6 +135,9 @@ class MusicPlayer:
     async def play_next(self) -> None:
         if not self.queue:
             self.current_song = None
+            self.current_thumbnail = None
+            if self.view:
+                await self.view.update()
             guild = self.bot.get_guild(self.guild_id)
             if guild and guild.voice_client and guild.voice_client.is_connected():
                 await guild.voice_client.disconnect()
@@ -72,6 +145,10 @@ class MusicPlayer:
  
         item = self.queue.pop(0)
         self.current_song = item["title"]
+        self.current_thumbnail = item.get("thumbnail")
+
+        if self.view:
+            await self.view.update()
  
         url = await self._resolve_url(item)
         if url is None:
@@ -114,10 +191,12 @@ class MusicPlayer:
                 print(f"[MusicPlayer] yt-dlp search error: {exc}")
         return None
  
- 
     async def stop(self) -> None:
         self.queue.clear()
         self.current_song = None
+        self.current_thumbnail = None
+        self.playback_message = None
+        self.view = None
         guild = self.bot.get_guild(self.guild_id)
         if guild and guild.voice_client:
             await guild.voice_client.disconnect()
@@ -219,7 +298,12 @@ class MusicCog(commands.Cog):
         if resource_type == "track":
             track = self.sp.track(url)
             name = f"{track['artists'][0]['name']} - {track['name']}"
-            player.enqueue({"type": "search", "data": name, "title": name}, position)
+            thumbnail = None
+            try:
+                thumbnail = track["album"]["images"][0]["url"]
+            except (IndexError, KeyError):
+                pass
+            player.enqueue({"type": "search", "data": name, "title": name, "thumbnail": thumbnail}, position)
             return 1, name
  
         fetcher = {"playlist": self.sp.playlist_items, "album": self.sp.album_tracks}[resource_type]
@@ -235,9 +319,14 @@ class MusicCog(commands.Cog):
             if not track:
                 continue
             name = f"{track['artists'][0]['name']} - {track['name']}"
+            thumbnail = None
+            try:
+                thumbnail = track["album"]["images"][0]["url"]
+            except (IndexError, KeyError):
+                pass
             if first_title is None:
                 first_title = name
-            player.enqueue({"type": "search", "data": name, "title": name}, position)
+            player.enqueue({"type": "search", "data": name, "title": name, "thumbnail": thumbnail}, position)
             count += 1
         return count, first_title
  
@@ -252,14 +341,15 @@ class MusicCog(commands.Cog):
         if not interaction.user.voice:
             await interaction.followup.send("You're not in a voice channel.")
             return
- 
+
         voice_client = await self._ensure_voice(interaction)
         if voice_client is None:
             return
- 
+
         player = self._get_player(interaction.guild.id)
         spotify_type = self._detect_spotify_type(query)
- 
+        should_play_next = not voice_client.is_playing()
+
         if spotify_type:
             if not self.sp:
                 await interaction.followup.send("Spotify is not configured.")
@@ -272,8 +362,9 @@ class MusicCog(commands.Cog):
             if added == 0:
                 await interaction.followup.send(f"No playable tracks found in Spotify {spotify_type}.")
                 return
-            await interaction.followup.send(f"Added to queue: **{title or 'Unknown'}**")
- 
+            if not should_play_next:
+                await interaction.followup.send(f"Added to queue: **{title or 'Unknown'}**")
+
         else:
             try:
                 loop = asyncio.get_event_loop()
@@ -285,21 +376,28 @@ class MusicCog(commands.Cog):
                     info = info["entries"][0]
                 url = info.get("url") or info.get("webpage_url")
                 title = info.get("title", "Unknown")
+                thumbnail = info.get("thumbnail")
                 if not url:
                     raise ValueError("No playable URL found.")
-                player.enqueue({"type": "url", "data": url, "title": title}, position)
-                await interaction.followup.send(f"Added to queue: **{title}**")
+                player.enqueue({"type": "url", "data": url, "title": title, "thumbnail": thumbnail}, position)
+                if not should_play_next:
+                    await interaction.followup.send(f"Added to queue: **{title}**")
             except Exception as exc:
                 await interaction.followup.send("Failed to find or play the track.")
                 print(f"[MusicCog] yt-dlp error: {exc}")
                 return
- 
-        if not voice_client.is_playing():
+
+        if player.playback_message is None:
+            player.view = PlaybackView(player)
+            player.playback_message = await interaction.followup.send(
+                embed=player.view.build_embed(), view=player.view
+            )
+        else:
+            await player.view.update()
+
+        if should_play_next:
             await player.play_next()
-            if player.current_song:
-                msg = next(self._play_messages).format(title=player.current_song)
-                await interaction.followup.send(msg)
- 
+
 
     @app_commands.command(name="stop", description="Stop playback and clear the queue")
     async def stop(self, interaction: discord.Interaction) -> None:
@@ -311,9 +409,11 @@ class MusicCog(commands.Cog):
             await interaction.response.send_message("I'm not connected to any voice channel.")
             return
  
+        await interaction.response.defer()
         player = self._get_player(interaction.guild.id)
         await player.stop()
-        await interaction.response.send_message(next(self._stop_messages))
+        if player.view:
+            await player.view.update()
 
 
     @app_commands.command(name="queue", description="Show the queue")
