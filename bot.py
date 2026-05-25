@@ -65,6 +65,9 @@ class MusicPlayer:
     async def play_next(self) -> None:
         if not self.queue:
             self.current_song = None
+            guild = self.bot.get_guild(self.guild_id)
+            if guild and guild.voice_client and guild.voice_client.is_connected():
+                await guild.voice_client.disconnect()
             return
  
         item = self.queue.pop(0)
@@ -184,6 +187,26 @@ class MusicCog(commands.Cog):
         finally:
             self._connecting.discard(guild_id)
  
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
+        guild = member.guild
+        voice_client = guild.voice_client
+        if voice_client is None or not voice_client.is_connected():
+            return
+ 
+        voice_channel = voice_client.channel
+        if voice_channel is None:
+            return
+ 
+        non_bot_members = [m for m in voice_channel.members if not m.bot]
+        if non_bot_members:
+            return
+ 
+        player = self._get_player(guild.id)
+        player.queue.clear()
+        player.current_song = None
+        await voice_client.disconnect()
+ 
     @staticmethod
     def _detect_spotify_type(url: str) -> str | None:
         for kind in ("track", "playlist", "album"):
@@ -277,6 +300,7 @@ class MusicCog(commands.Cog):
                 msg = next(self._play_messages).format(title=player.current_song)
                 await interaction.followup.send(msg)
  
+
     @app_commands.command(name="stop", description="Stop playback and clear the queue")
     async def stop(self, interaction: discord.Interaction) -> None:
         if interaction.user.id == SPECIAL_USER_ID:
@@ -291,12 +315,14 @@ class MusicCog(commands.Cog):
         await player.stop()
         await interaction.response.send_message(next(self._stop_messages))
 
+
     @app_commands.command(name="queue", description="Show the queue")
     async def queue(self, interaction: discord.Interaction) -> None:
 
         player = self._get_player(interaction.guild.id)
         queue = player.show_queue()
         await interaction.response.send_message(queue)
+
 
     @app_commands.command(name="move", description="Move a song in the queue (leave position blank to move to the top)")
     async def move(self, interaction: discord.Interaction, song: str, position: int = 1) -> None:
@@ -353,6 +379,7 @@ class MusicCog(commands.Cog):
                 break
         return choices
 
+
     @app_commands.command(name="shuffle", description="Randomly Shuffle the queue")
     async def shuffle(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -364,6 +391,34 @@ class MusicCog(commands.Cog):
 
         random.shuffle(player.queue)
         await interaction.followup.send("Shuffled the queue successfully!")
+
+
+    @app_commands.command(name="skip", description="Skip the currently playing song")
+    async def skip(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+        guild = interaction.guild
+        player = self._get_player(guild.id) if guild else None
+
+        if player is None or (not player.current_song and not player.queue):
+            await interaction.followup.send("There is no song to skip.")
+            return
+
+        voice_client = guild.voice_client if guild else None
+        if voice_client is None or not voice_client.is_connected():
+            await interaction.followup.send("I'm not connected to a voice channel.")
+            return
+
+        try:
+            next_song = player.queue[0]["title"] if player.queue else None
+            voice_client.stop()
+            
+            if next_song:
+                await interaction.followup.send(f"Successfully skipped to **{next_song}**.")
+            else:
+                await interaction.followup.send("Skipped the song. There are no more songs in the queue.")
+        except Exception as exc:
+            await interaction.followup.send(f"Failed to skip the song: {exc}")
 
 
     @app_commands.command(name="hello", description="Send a DM to another user")
