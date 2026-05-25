@@ -1,6 +1,7 @@
 import asyncio
 import itertools
 import os
+import random
  
 import discord
 import spotipy
@@ -297,7 +298,7 @@ class MusicCog(commands.Cog):
         queue = player.show_queue()
         await interaction.response.send_message(queue)
 
-    @app_commands.command(name="move", description="Move a song in the queue")
+    @app_commands.command(name="move", description="Move a song in the queue (leave position blank to move to the top)")
     async def move(self, interaction: discord.Interaction, song: str, position: int = 1) -> None:
         await interaction.response.defer()
 
@@ -351,6 +352,19 @@ class MusicCog(commands.Cog):
             if len(choices) >= 25:
                 break
         return choices
+
+    @app_commands.command(name="shuffle", description="Randomly Shuffle the queue")
+    async def shuffle(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+        player = self._get_player(interaction.guild.id)
+        if not player.queue:
+            await interaction.followup.send("The queue is empty.")
+            return
+
+        random.shuffle(player.queue)
+        await interaction.followup.send("Shuffled the queue successfully!")
+
 
     @app_commands.command(name="hello", description="Send a DM to another user")
     async def hello(
